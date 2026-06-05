@@ -9,9 +9,12 @@
 --   })
 
 local prompt = {}
+local socket = require("socket")
+
 local _state = "IDLE"
 local _callbacks = {}
-local _socket = nil
+local _server_socket = nil
+local _client_socket = nil
 local _ui_process = nil
 
 -- IPC Socket path
@@ -26,10 +29,98 @@ local STATE = {
 }
 
 --- Initialize the prompt module
--- Sets up socket listener
+-- Sets up Unix domain socket listener
 local function init()
-    -- TODO: Setup Unix domain socket listener
-    -- Listen for SUBMIT:text and CANCEL messages from Qt frontend
+    -- Remove old socket file if it exists
+    os.remove(SOCKET_PATH)
+    
+    -- Create Unix domain socket server
+    _server_socket = socket.unix()
+    
+    -- Bind to socket path
+    local ok, err = _server_socket:bind(SOCKET_PATH)
+    if not ok then
+        print("[HyprPrompt] Failed to bind socket: " .. err)
+        return false
+    end
+    
+    -- Listen for connections (backlog of 1)
+    local ok, err = _server_socket:listen(1)
+    if not ok then
+        print("[HyprPrompt] Failed to listen on socket: " .. err)
+        return false
+    end
+    
+    -- Set socket to non-blocking mode
+    _server_socket:settimeout(0)
+    
+    print("[HyprPrompt] Socket listener initialized at " .. SOCKET_PATH)
+    return true
+end
+
+--- Accept incoming connection from Qt frontend
+-- Non-blocking, returns immediately if no connection available
+local function accept_connection()
+    if not _server_socket then
+        return false
+    end
+    
+    local client, err = _server_socket:accept()
+    
+    if client then
+        -- Set client socket to non-blocking
+        client:settimeout(0)
+        _client_socket = client
+        print("[HyprPrompt] Client connected")
+        return true
+    end
+    
+    return false
+end
+
+--- Read message from client socket
+-- Non-blocking, returns nil if no data available
+local function read_message()
+    if not _client_socket then
+        return nil
+    end
+    
+    local data, err = _client_socket:receive("*l")
+    
+    if data then
+        return data
+    elseif err == "closed" then
+        -- Client disconnected
+        _client_socket:close()
+        _client_socket = nil
+        print("[HyprPrompt] Client disconnected")
+        return nil
+    elseif err == "timeout" then
+        -- No data available (non-blocking)
+        return nil
+    else
+        print("[HyprPrompt] Socket error: " .. err)
+        if _client_socket then
+            _client_socket:close()
+            _client_socket = nil
+        end
+        return nil
+    end
+end
+
+--- Poll for IPC messages
+-- Should be called regularly from HyprLua event loop
+local function poll()
+    -- Try to accept new connection if state is OPEN
+    if _state == STATE.OPEN and not _client_socket then
+        accept_connection()
+    end
+    
+    -- Try to read message from client
+    local message = read_message()
+    if message then
+        handle_message(message)
+    end
 end
 
 --- Handle IPC message from Qt frontend
@@ -42,13 +133,52 @@ local function handle_message(message)
         end
         _state = STATE.IDLE
         _callbacks = {}
+        
+        -- Close client connection
+        if _client_socket then
+            _client_socket:close()
+            _client_socket = nil
+        end
+        
+        print("[HyprPrompt] Submitted: " .. text)
+        
     elseif message == "CANCEL" then
         if _callbacks.on_cancel then
             _callbacks.on_cancel()
         end
         _state = STATE.IDLE
         _callbacks = {}
+        
+        -- Close client connection
+        if _client_socket then
+            _client_socket:close()
+            _client_socket = nil
+        end
+        
+        print("[HyprPrompt] Cancelled")
+    else
+        print("[HyprPrompt] Unknown message: " .. message)
     end
+end
+
+--- Launch Qt frontend process
+-- @param placeholder string - Placeholder text to display
+local function launch_ui(placeholder)
+    -- Build command to launch Qt frontend
+    -- Pass placeholder as environment variable or command line arg
+    local cmd = "hyprprompt"
+    
+    -- You can extend this to pass placeholder via args or env
+    -- For now, using basic launch
+    
+    local ok = os.execute(cmd .. " > /dev/null 2>&1 &")
+    if not ok then
+        print("[HyprPrompt] Failed to launch UI")
+        return false
+    end
+    
+    print("[HyprPrompt] UI process launched")
+    return true
 end
 
 --- Show the prompt
@@ -60,12 +190,20 @@ function prompt.show(opts)
     -- Validate state
     if _state ~= STATE.IDLE then
         print("[HyprPrompt] Prompt already open")
-        return
+        return false
     end
     
     -- Validate options
     if not opts or type(opts) ~= "table" then
         error("[HyprPrompt] opts must be a table")
+    end
+    
+    -- Validate callbacks are functions if provided
+    if opts.on_submit and type(opts.on_submit) ~= "function" then
+        error("[HyprPrompt] on_submit must be a function")
+    end
+    if opts.on_cancel and type(opts.on_cancel) ~= "function" then
+        error("[HyprPrompt] on_cancel must be a function")
     end
     
     -- Store callbacks
@@ -74,15 +212,39 @@ function prompt.show(opts)
         on_cancel = opts.on_cancel
     }
     
-    -- Store placeholder (pass to Qt frontend)
+    -- Get placeholder text
     local placeholder = opts.placeholder or ""
     
-    -- Launch Qt frontend
-    -- TODO: Start Qt process with placeholder parameter
-    -- TODO: Send placeholder via IPC or command line arg
-    
+    -- Update state
     _state = STATE.OPEN
+    
+    -- Launch Qt frontend
+    if not launch_ui(placeholder) then
+        _state = STATE.IDLE
+        _callbacks = {}
+        return false
+    end
+    
+    print("[HyprPrompt] Waiting for input...")
+    return true
 end
+
+--- Cleanup and shutdown
+function prompt.shutdown()
+    if _client_socket then
+        _client_socket:close()
+        _client_socket = nil
+    end
+    if _server_socket then
+        _server_socket:close()
+        _server_socket = nil
+    end
+    os.remove(SOCKET_PATH)
+    print("[HyprPrompt] Shutdown complete")
+end
+
+-- Export poll function for event loop integration
+prompt.poll = poll
 
 -- Initialize on module load
 init()
