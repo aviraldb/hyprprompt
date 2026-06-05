@@ -10,17 +10,22 @@ ApplicationWindow {
     height: 80
     
     // Window properties
-    flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+    flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Dialog
     color: "transparent"
+    
+    // Wayland app-id (user can apply window rules with this)
+    title: "hyprprompt"
     
     // Center on screen
     x: (Screen.width - width) / 2
     y: (Screen.height - height) / 2
     
-    // TODO: Wayland native hints
-    // - Set app-id to "hyprprompt"
-    // - Make borderless
-    // - Make always-on-top
+    // Window positioning
+    Component.onCompleted: {
+        // Request focus
+        activateWindow()
+        raise()
+    }
     
     Rectangle {
         id: background
@@ -32,7 +37,7 @@ ApplicationWindow {
         border.color: "#45475a"
     }
     
-    // TODO: Blur effect (Phase 2)
+    // Future: Blur effect (Phase 2)
     // MultiEffect {
     //     source: background
     //     blur: 20
@@ -50,36 +55,53 @@ ApplicationWindow {
             color: "#89b4fa"
             font.pixelSize: 16
             font.family: "monospace"
+            font.weight: Font.Bold
         }
         
         TextField {
             id: input
             Layout.fillWidth: true
-            placeholderText: "Enter text..."
+            placeholderText: promptController.placeholder || "Enter text..."
             color: "#cdd6f4"
+            placeholderTextColor: "#6c7086"
             font.pixelSize: 16
             font.family: "monospace"
+            selectByMouse: true
+            
             background: Rectangle {
                 color: "transparent"
                 border.width: 0
             }
             
             Keys.onReturnPressed: {
-                // TODO: Emit on_submit signal with text
-                console.log("Submitted:", input.text)
+                if (input.text.length > 0 || input.text === "") {
+                    promptController.onTextSubmitted(input.text)
+                    promptWindow.close()
+                }
             }
             
             Keys.onEscapePressed: {
-                // TODO: Emit on_cancel signal
-                console.log("Cancelled")
+                promptController.onCancelled()
+                promptWindow.close()
             }
             
             focus: true
         }
     }
     
-    // TODO: Phase 2 - Animations
-    // - Fade in on open
-    // - Smooth scale
-    // - Fade out on close
+    // Future: Phase 2 - Animations
+    // Behavior on opacity {
+    //     NumberAnimation {
+    //         duration: 200
+    //         easing.type: Easing.InOutQuad
+    //     }
+    // }
+    
+    // Future: Smooth scale animation on entry
+    // transform: Scale {
+    //     origin.x: width / 2
+    //     origin.y: height / 2
+    //     xScale: 0.95
+    //     yScale: 0.95
+    // }
 }
