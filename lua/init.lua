@@ -16,6 +16,7 @@ local _callbacks = {}
 local _server_socket = nil
 local _client_socket = nil
 local _ui_process = nil
+local _pending_messages = {}  -- Buffer for multi-line messages
 
 -- IPC Socket path
 local SOCKET_PATH = "/tmp/hyprprompt.sock"
@@ -80,14 +81,17 @@ end
 
 --- Read message from client socket
 -- Non-blocking, returns nil if no data available
+-- Handles newline-terminated messages
 local function read_message()
     if not _client_socket then
         return nil
     end
     
+    -- Try to read a line (terminated by \n)
     local data, err = _client_socket:receive("*l")
     
     if data then
+        -- Successfully read a complete line
         return data
     elseif err == "closed" then
         -- Client disconnected
@@ -110,6 +114,7 @@ end
 
 --- Poll for IPC messages
 -- Should be called regularly from HyprLua event loop
+-- Non-blocking, returns immediately
 local function poll()
     -- Try to accept new connection if state is OPEN
     if _state == STATE.OPEN and not _client_socket then
@@ -126,8 +131,11 @@ end
 --- Handle IPC message from Qt frontend
 -- @param message string - IPC message ("SUBMIT:text" or "CANCEL")
 local function handle_message(message)
+    -- Trim whitespace
+    message = message:gsub("^%s+", ""):gsub("%s+$", "")
+    
     if message:sub(1, 7) == "SUBMIT:" then
-        local text = message:sub(8)
+        local text = message:sub(8)  -- Extract text after "SUBMIT:"
         if _callbacks.on_submit then
             _callbacks.on_submit(text)
         end
@@ -165,19 +173,21 @@ end
 -- @param placeholder string - Placeholder text to display
 local function launch_ui(placeholder)
     -- Build command to launch Qt frontend
-    -- Pass placeholder as environment variable or command line arg
     local cmd = "hyprprompt"
     
-    -- You can extend this to pass placeholder via args or env
-    -- For now, using basic launch
+    -- Pass placeholder as command line argument
+    if placeholder and placeholder ~= "" then
+        cmd = cmd .. " --placeholder '" .. placeholder .. "'"
+    end
     
+    -- Launch in background, suppress output
     local ok = os.execute(cmd .. " > /dev/null 2>&1 &")
     if not ok then
         print("[HyprPrompt] Failed to launch UI")
         return false
     end
     
-    print("[HyprPrompt] UI process launched")
+    print("[HyprPrompt] UI process launched with placeholder: " .. (placeholder or "default"))
     return true
 end
 
@@ -186,6 +196,7 @@ end
 --   - placeholder (string): Placeholder text
 --   - on_submit (function): Callback when user submits (receives text)
 --   - on_cancel (function): Callback when user cancels
+-- @return boolean - true if prompt was shown, false if already open
 function prompt.show(opts)
     -- Validate state
     if _state ~= STATE.IDLE then
@@ -227,6 +238,18 @@ function prompt.show(opts)
     
     print("[HyprPrompt] Waiting for input...")
     return true
+end
+
+--- Get current state
+-- @return string - Current state (IDLE, OPEN, SUBMIT, or CANCEL)
+function prompt.get_state()
+    return _state
+end
+
+--- Check if prompt is open
+-- @return boolean - true if prompt is currently open
+function prompt.is_open()
+    return _state == STATE.OPEN
 end
 
 --- Cleanup and shutdown
